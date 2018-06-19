@@ -19,6 +19,8 @@ The vault-init service supports the following environment variables for configur
 * `CHECK_INTERVAL` - The time in seconds between Vault health checks. (300)
 * `GCS_BUCKET_NAME` - The Google Cloud Storage Bucket where the vault master key and root token is stored. 
 * `KMS_KEY_ID` - The Google Cloud KMS key ID used to encrypt and decrypt the vault master key and root token.
+* `VAULT_ADDR` - the address of the Vault server to unseal. Defaults to `https://127.0.0.1:8200`.
+* `UNSEAL_ONCE` - only perform the init/unseal operation once. This is useful if you plan to seal the Vault manually. Note that this is once _per instance_ and can make Vault unable to service requests if it becomes sealed.
 
 ### Example Values
 

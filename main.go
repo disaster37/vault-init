@@ -30,6 +30,7 @@ var (
 	httpClient    http.Client
 	kmsKeyId      string
 	storageClient *storage.Client
+	once          bool
 )
 
 // InitRequest holds a Vault init request.
@@ -89,6 +90,11 @@ func main() {
 		log.Fatal("KMS_KEY_ID must be set and not empty")
 	}
 
+	onceStr := os.Getenv("UNSEAL_ONCE")
+	if onceStr != "" {
+		once, _ = strconv.ParseBool(onceStr)
+	}
+
 	ctx := context.Background()
 	storageClient, err = storage.NewClient(ctx)
 	if err != nil {
@@ -130,6 +136,11 @@ func main() {
 			unseal()
 		default:
 			log.Printf("Vault is in an unknown state. Status code: %d", response.StatusCode)
+		}
+
+		if once {
+			log.Printf("Once mode enabled, exiting...")
+			os.Exit(0)
 		}
 
 		log.Printf("Next check in %s", checkIntervalDuration)
