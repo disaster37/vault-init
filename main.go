@@ -164,11 +164,13 @@ func manageVault(backendService backend.Backend) error {
 				log.Fatal("Error during Vault initialization: ", err)
 				return err
 			}
+			log.Printf("Vault is now initialized !")
 			err = vaultService.Unseal(backendService)
 			if err != nil {
 				log.Fatal("Error during unseal step: ", err)
 				return err
 			}
+			log.Printf("Vault is now unsealed !")
 			break
 		case 503:
 			log.Println("Vault is sealed. Unsealing...")
@@ -177,6 +179,7 @@ func manageVault(backendService backend.Backend) error {
 				log.Fatal("Error during unseal step: ", err)
 				return err
 			}
+			log.Printf("Vault is now unsealed !")
 			break
 		default:
 			log.Printf("Vault is in an unknown state. Status code: %d", httpStatusCode)
