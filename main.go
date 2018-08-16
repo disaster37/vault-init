@@ -5,157 +5,144 @@
 package main
 
 import (
-	"bytes"
-	"context"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
-	"io/ioutil"
+	"gopkg.in/urfave/cli.v1"
 	"log"
 	"net/http"
 	"os"
-	"os/signal"
-	"runtime"
-	"strconv"
-	"syscall"
+	"strings"
 	"time"
 
-	"cloud.google.com/go/storage"
-	"golang.org/x/oauth2/google"
-	"google.golang.org/api/cloudkms/v1"
-	"google.golang.org/api/option"
+	"github.com/disaster37/vault-init/backend"
+	"github.com/disaster37/vault-init/vault/model"
+	"github.com/disaster37/vault-init/vault/service"
 )
 
 var (
-	vaultAddr     string
-	checkInterval string
-	gcsBucketName string
+	vaultUrl      string
+	checkInterval int
+	backendStore  string
+	filePath      string
+	cryptKey      string
 	httpClient    http.Client
-
-	kmsService *cloudkms.Service
-	kmsKeyId   string
-
-	storageClient *storage.Client
-
-	userAgent = fmt.Sprintf("vault-init/0.1.0 (%s)", runtime.Version())
 )
 
-// InitRequest holds a Vault init request.
-type InitRequest struct {
-	SecretShares    int `json:"secret_shares"`
-	SecretThreshold int `json:"secret_threshold"`
-}
-
-// InitResponse holds a Vault init response.
-type InitResponse struct {
-	Keys       []string `json:"keys"`
-	KeysBase64 []string `json:"keys_base64"`
-	RootToken  string   `json:"root_token"`
-}
-
-// UnsealRequest holds a Vault unseal request.
-type UnsealRequest struct {
-	Key   string `json:"key"`
-	Reset bool   `json:"reset"`
-}
-
-// UnsealResponse holds a Vault unseal response.
-type UnsealResponse struct {
-	Sealed   bool `json:"sealed"`
-	T        int  `json:"t"`
-	N        int  `json:"n"`
-	Progress int  `json:"progress"`
-}
-
 func main() {
-	log.Println("Starting the vault-init service...")
 
-	vaultAddr = os.Getenv("VAULT_ADDR")
-	if vaultAddr == "" {
-		vaultAddr = "https://127.0.0.1:8200"
+	// CLI settings
+	app := cli.NewApp()
+	app.Usage = "Auto init and auto unseal vault"
+	app.Version = "develop"
+	app.Flags = []cli.Flag{
+		cli.StringFlag{
+			Name:        "vault-url",
+			Usage:       "The Rancher base URL",
+			Value:       "https://127.0.0.1:8200",
+			Destination: &vaultUrl,
+		},
+		cli.IntFlag{
+			Name:        "check-interval",
+			Usage:       "The interval in second to check if vault is online",
+			Value:       10,
+			Destination: &checkInterval,
+		},
 	}
-
-	checkInterval = os.Getenv("CHECK_INTERVAL")
-	if checkInterval == "" {
-		checkInterval = "10"
-	}
-
-	i, err := strconv.Atoi(checkInterval)
-	if err != nil {
-		log.Fatalf("CHECK_INTERVAL is invalid: %s", err)
-	}
-
-	checkIntervalDuration := time.Duration(i) * time.Second
-
-	gcsBucketName = os.Getenv("GCS_BUCKET_NAME")
-	if gcsBucketName == "" {
-		log.Fatal("GCS_BUCKET_NAME must be set and not empty")
-	}
-
-	kmsKeyId = os.Getenv("KMS_KEY_ID")
-	if kmsKeyId == "" {
-		log.Fatal("KMS_KEY_ID must be set and not empty")
-	}
-
-	kmsCtx, kmsCtxCancel := context.WithCancel(context.Background())
-	defer kmsCtxCancel()
-	kmsClient, err := google.DefaultClient(kmsCtx, "https://www.googleapis.com/auth/cloudkms")
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	kmsService, err = cloudkms.New(kmsClient)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-	kmsService.UserAgent = userAgent
-
-	storageCtx, storageCtxCancel := context.WithCancel(context.Background())
-	defer storageCtxCancel()
-	storageClient, err = storage.NewClient(storageCtx,
-		option.WithUserAgent(userAgent),
-		option.WithScopes(storage.ScopeReadWrite),
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	httpClient = http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true,
+	app.Commands = []cli.Command{
+		{
+			Name:  "file-store",
+			Usage: "Store the rootToken and unseal keys in encrypted file",
+			Flags: []cli.Flag{
+				cli.StringFlag{
+					Name:  "file-path",
+					Usage: "The full path where to store the crypt file",
+				},
+				cli.StringFlag{
+					Name:  "encrypt-key",
+					Usage: "The key to encrypt / decrypt data",
+				},
 			},
+			Action: manageVaultFileStore,
+		},
+		{
+			Name:  "read-file-store",
+			Usage: "Read the contend of encrypted file to retrive rootToken and unseal keys",
+			Flags: []cli.Flag{
+				cli.StringFlag{
+					Name:  "file-path",
+					Usage: "The full path where to store the crypt file",
+				},
+				cli.StringFlag{
+					Name:  "encrypt-key",
+					Usage: "The key to encrypt / decrypt data",
+				},
+			},
+			Action: readFileStore,
+		},
+		{
+			Name:  "write-file-store",
+			Usage: "Write file store for already initialized vault",
+			Flags: []cli.Flag{
+				cli.StringFlag{
+					Name:  "file-path",
+					Usage: "The full path where to store the crypt file",
+				},
+				cli.StringFlag{
+					Name:  "encrypt-key",
+					Usage: "The key to encrypt / decrypt data",
+				},
+				cli.StringFlag{
+					Name:  "root-token",
+					Usage: "The root Token",
+				},
+				cli.StringFlag{
+					Name:  "unseal-keys",
+					Usage: "The unseal Keys separated by comma",
+				},
+			},
+			Action: writeFileStore,
 		},
 	}
 
-	signalCh := make(chan os.Signal)
-	signal.Notify(signalCh,
-		syscall.SIGINT,
-		syscall.SIGTERM,
-		syscall.SIGKILL,
-	)
+	app.Run(os.Args)
+}
 
-	stop := func() {
-		log.Printf("Shutting down")
-		kmsCtxCancel()
-		storageCtxCancel()
-		os.Exit(0)
+func manageVaultFileStore(c *cli.Context) error {
+
+	if c.String("file-path") == "" {
+		return cli.NewExitError("You must set --file-path parameter", 1)
+	}
+
+	if c.String("encrypt-key") == "" {
+		return cli.NewExitError("You must set --encrypt-key parameter", 1)
+	}
+
+	backendService := backend.NewFileBackend(c.String("file-path"), c.String("encrypt-key"))
+
+	err := manageVault(backendService)
+	if err != nil {
+		return cli.NewExitError(err, 1)
+	}
+
+	return nil
+}
+
+func manageVault(backendService backend.Backend) error {
+
+	log.Println("Starting the vault-init service...")
+
+	vaultService := vaultService.NewVault(vaultUrl)
+	checkIntervalDuration := time.Duration(checkInterval) * time.Second
+
+	defer backendService.Defer()
+	err := backendService.Init()
+	if err != nil {
+		return err
 	}
 
 	for {
-		select {
-		case <-signalCh:
-			stop()
-		default:
-		}
-		response, err := httpClient.Head(vaultAddr + "/v1/sys/health")
 
-		if response != nil && response.Body != nil {
-			response.Body.Close()
-		}
+		httpStatusCode, err := vaultService.Health()
 
 		if err != nil {
 			log.Println(err)
@@ -163,219 +150,115 @@ func main() {
 			continue
 		}
 
-		switch response.StatusCode {
+		switch httpStatusCode {
 		case 200:
 			log.Println("Vault is initialized and unsealed.")
+			break
 		case 429:
 			log.Println("Vault is unsealed and in standby mode.")
+			break
 		case 501:
 			log.Println("Vault is not initialized. Initializing and unsealing...")
-			initialize()
-			unseal()
+			err := vaultService.Initialize(backendService)
+			if err != nil {
+				log.Fatal("Error during Vault initialization: ", err)
+				return err
+			}
+			err = vaultService.Unseal(backendService)
+			if err != nil {
+				log.Fatal("Error during unseal step: ", err)
+				return err
+			}
+			break
 		case 503:
 			log.Println("Vault is sealed. Unsealing...")
-			unseal()
+			err := vaultService.Unseal(backendService)
+			if err != nil {
+				log.Fatal("Error during unseal step: ", err)
+				return err
+			}
+			break
 		default:
-			log.Printf("Vault is in an unknown state. Status code: %d", response.StatusCode)
+			log.Printf("Vault is in an unknown state. Status code: %d", httpStatusCode)
 		}
 
 		log.Printf("Next check in %s", checkIntervalDuration)
-
-		select {
-		case <-signalCh:
-			stop()
-		case <-time.After(checkIntervalDuration):
-		}
+		time.Sleep(checkIntervalDuration)
 	}
+
+	log.Printf("Shutting down")
+	backendService.Defer()
+
+	return nil
 }
 
-func initialize() {
-	initRequest := InitRequest{
-		SecretShares:    5,
-		SecretThreshold: 3,
+func readFileStore(c *cli.Context) error {
+	if c.String("file-path") == "" {
+		return cli.NewExitError("You must set --file-path parameter", 1)
 	}
 
-	initRequestData, err := json.Marshal(&initRequest)
+	if c.String("encrypt-key") == "" {
+		return cli.NewExitError("You must set --encrypt-key parameter", 1)
+	}
+
+	backendService := backend.NewFileBackend(c.String("file-path"), c.String("encrypt-key"))
+
+	initResponse, err := backendService.Read()
 	if err != nil {
-		log.Println(err)
-		return
+		return cli.NewExitError(err, 1)
 	}
 
-	r := bytes.NewReader(initRequestData)
-	request, err := http.NewRequest("PUT", vaultAddr+"/v1/sys/init", r)
+	initResponseJson, err := json.Marshal(initResponse)
 	if err != nil {
-		log.Println(err)
-		return
+		return cli.NewExitError(err, 1)
 	}
 
-	response, err := httpClient.Do(request)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-	defer response.Body.Close()
+	log.Printf("Yours infos:\n %s", initResponseJson)
 
-	initRequestResponseBody, err := ioutil.ReadAll(response.Body)
-	if err != nil {
-		log.Println(err)
-		return
-	}
+	return nil
 
-	if response.StatusCode != 200 {
-		log.Printf("init: non 200 status code: %d", response.StatusCode)
-		return
-	}
-
-	var initResponse InitResponse
-
-	if err := json.Unmarshal(initRequestResponseBody, &initResponse); err != nil {
-		log.Println(err)
-		return
-	}
-
-	log.Println("Encrypting unseal keys and the root token...")
-
-	rootTokenEncryptRequest := &cloudkms.EncryptRequest{
-		Plaintext: base64.StdEncoding.EncodeToString([]byte(initResponse.RootToken)),
-	}
-
-	rootTokenEncryptResponse, err := kmsService.Projects.Locations.KeyRings.CryptoKeys.Encrypt(kmsKeyId, rootTokenEncryptRequest).Do()
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	unsealKeysEncryptRequest := &cloudkms.EncryptRequest{
-		Plaintext: base64.StdEncoding.EncodeToString(initRequestResponseBody),
-	}
-
-	unsealKeysEncryptResponse, err := kmsService.Projects.Locations.KeyRings.CryptoKeys.Encrypt(kmsKeyId, unsealKeysEncryptRequest).Do()
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	bucket := storageClient.Bucket(gcsBucketName)
-
-	// Save the encrypted unseal keys.
-	ctx := context.Background()
-	unsealKeysObject := bucket.Object("unseal-keys.json.enc").NewWriter(ctx)
-	defer unsealKeysObject.Close()
-
-	_, err = unsealKeysObject.Write([]byte(unsealKeysEncryptResponse.Ciphertext))
-	if err != nil {
-		log.Println(err)
-	}
-
-	log.Printf("Unseal keys written to gs://%s/%s", gcsBucketName, "unseal-keys.json.enc")
-
-	// Save the encrypted root token.
-	rootTokenObject := bucket.Object("root-token.enc").NewWriter(ctx)
-	defer rootTokenObject.Close()
-
-	_, err = rootTokenObject.Write([]byte(rootTokenEncryptResponse.Ciphertext))
-	if err != nil {
-		log.Println(err)
-	}
-
-	log.Printf("Root token written to gs://%s/%s", gcsBucketName, "root-token.enc")
-
-	log.Println("Initialization complete.")
 }
 
-func unseal() {
-	bucket := storageClient.Bucket(gcsBucketName)
+func writeFileStore(c *cli.Context) error {
 
-	ctx := context.Background()
-	unsealKeysObject, err := bucket.Object("unseal-keys.json.enc").NewReader(ctx)
+	if c.String("file-path") == "" {
+		return cli.NewExitError("You must set --file-path parameter", 1)
+	}
+
+	if c.String("encrypt-key") == "" {
+		return cli.NewExitError("You must set --encrypt-key parameter", 1)
+	}
+
+	if c.String("root-token") == "" {
+		return cli.NewExitError("You must set --root-token parameter", 1)
+	}
+
+	if c.String("unseal-keys") == "" {
+		return cli.NewExitError("You must set --unseal-keys parameter", 1)
+	}
+
+	backendService := backend.NewFileBackend(c.String("file-path"), c.String("encrypt-key"))
+
+	keys := strings.Split(c.String("unseal-keys"), ",")
+	keysBase64 := make([]string, 0, 1)
+
+	for _, key := range keys {
+		keysBase64 = append(keysBase64, base64.StdEncoding.EncodeToString([]byte(key)))
+	}
+
+	initResponse := &vaultModel.InitResponse{
+		Keys:       keys,
+		KeysBase64: keysBase64,
+		RootToken:  c.String("root-token"),
+	}
+
+	err := backendService.Write(initResponse)
 	if err != nil {
-		log.Println(err)
-		return
+		return cli.NewExitError(err, 1)
 	}
 
-	defer unsealKeysObject.Close()
+	log.Printf("Encrypted file %s created successfully", c.String("file-path"))
 
-	unsealKeysData, err := ioutil.ReadAll(unsealKeysObject)
-	if err != nil {
-		log.Println(err)
-		return
-	}
+	return nil
 
-	unsealKeysDecryptRequest := &cloudkms.DecryptRequest{
-		Ciphertext: string(unsealKeysData),
-	}
-
-	unsealKeysDecryptResponse, err := kmsService.Projects.Locations.KeyRings.CryptoKeys.Decrypt(kmsKeyId, unsealKeysDecryptRequest).Do()
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	var initResponse InitResponse
-
-	unsealKeysPlaintext, err := base64.StdEncoding.DecodeString(unsealKeysDecryptResponse.Plaintext)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	if err := json.Unmarshal(unsealKeysPlaintext, &initResponse); err != nil {
-		log.Println(err)
-		return
-	}
-
-	for _, key := range initResponse.KeysBase64 {
-		done, err := unsealOne(key)
-		if done {
-			return
-		}
-
-		if err != nil {
-			log.Println(err)
-			return
-		}
-	}
-}
-
-func unsealOne(key string) (bool, error) {
-	unsealRequest := UnsealRequest{
-		Key: key,
-	}
-
-	unsealRequestData, err := json.Marshal(&unsealRequest)
-	if err != nil {
-		return false, err
-	}
-
-	r := bytes.NewReader(unsealRequestData)
-	request, err := http.NewRequest(http.MethodPut, vaultAddr+"/v1/sys/unseal", r)
-	if err != nil {
-		return false, err
-	}
-
-	response, err := httpClient.Do(request)
-	if err != nil {
-		return false, err
-	}
-	defer response.Body.Close()
-
-	if response.StatusCode != 200 {
-		return false, fmt.Errorf("unseal: non-200 status code: %d", response.StatusCode)
-	}
-
-	unsealRequestResponseBody, err := ioutil.ReadAll(response.Body)
-	if err != nil {
-		return false, err
-	}
-
-	var unsealResponse UnsealResponse
-	if err := json.Unmarshal(unsealRequestResponseBody, &unsealResponse); err != nil {
-		return false, err
-	}
-
-	if !unsealResponse.Sealed {
-		return true, nil
-	}
-
-	return false, nil
 }

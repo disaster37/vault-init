@@ -7,7 +7,12 @@ RUN \
   GOARCH=amd64 \
   go build -a -installsuffix cgo -o vault-init .
 
-FROM scratch
-ADD https://curl.haxx.se/ca/cacert.pem /etc/ssl/certs/ca-certificates.crt
+FROM alpine
+ENV VAULT_URL="https://120.0.0.1:8200" \
+    CHECK_INTERVAL="5" \
+    BACKEND="file-store" \
+    BACKEND_OTIONS="--help"
 COPY --from=builder /go/src/app/vault-init /
-CMD ["/vault-init"]
+RUN apk add --update curl bash ca-certificates &&\
+    rm -rf /var/cache/apk/*
+CMD ["/vault-init --vault-url ${VAULT_URL} --check-interval ${CHECK_INTERVAL} ${BACKEND} ${BACKEND_OPTIONS}"]
