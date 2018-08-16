@@ -38,16 +38,18 @@ func (f *File) Init() error {
 		return errors.New("You must set the cryptKey")
 	}
 
-	file, err := os.OpenFile(f.path, os.O_WRONLY, 0666)
-
+	var _, err = os.Stat(f.path)
 	if err != nil {
-		if os.IsPermission(err) {
-			errors.New(fmt.Sprintf("Unable to write to %s", f.path))
+		if os.IsNotExist(err) {
+			var file, err = os.Create(f.path)
+			if err != nil {
+				return err
+			}
+			defer file.Close()
 		} else {
 			return err
 		}
 	}
-	defer file.Close()
 
 	return nil
 }
@@ -75,6 +77,10 @@ func (f *File) Read() (*vaultModel.InitResponse, error) {
 	encryptedJsonInitResponse, err := ioutil.ReadFile(f.path)
 	if err != nil {
 		return nil, err
+	}
+
+	if len(encryptedJsonInitResponse) == 0 {
+		return nil, errors.New(fmt.Sprintf("The file %s is empty", f.path))
 	}
 
 	jsonInitResponse := &vaultModel.InitResponse{}
@@ -107,6 +113,11 @@ func (f *File) encrypt(data []byte) []byte {
 }
 
 func (f *File) decrypt(data []byte) []byte {
+
+	if len(data) == 0 {
+		return data
+	}
+
 	block, err := aes.NewCipher(f.cryptKey)
 	if err != nil {
 		panic(err.Error())

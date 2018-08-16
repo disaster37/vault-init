@@ -11,7 +11,7 @@ FROM alpine
 ENV VAULT_URL="https://120.0.0.1:8200" \
     CHECK_INTERVAL="5" \
     BACKEND="file-store" \
-    BACKEND_OTIONS="--help"
+    BACKEND_OPTIONS="--help"
 COPY --from=builder /go/src/github.com/disaster37/vault-init/vault-init /
 COPY docker-entrypoint.sh /
 RUN apk add --update curl bash ca-certificates &&\

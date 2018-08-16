@@ -95,7 +95,11 @@ func (v *Vault) Unseal(backend backend.Backend) error {
 
 	initResponse, err := backend.Read()
 	if err != nil {
-		return nil
+		return err
+	}
+
+	if len(initResponse.KeysBase64) == 0 {
+		return errors.New("No unseal key found in the backend")
 	}
 
 	for _, key := range initResponse.KeysBase64 {
@@ -116,6 +120,10 @@ func (v *Vault) Unseal(backend backend.Backend) error {
 }
 
 func (v *Vault) unsealOne(key string) (bool, error) {
+
+	if key == "" {
+		return false, errors.New("You must provide key")
+	}
 
 	unsealRequest := vaultModel.UnsealRequest{
 		Key: key,
